@@ -1,12 +1,13 @@
 package standalone_storage
 
 import (
+	"path/filepath"
+
 	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/config"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
-	"path/filepath"
 )
 
 // StandAloneStorage is an implementation of `Storage` for a single-node TinyKV instance. It does not
@@ -60,7 +61,8 @@ type StandaloneReader struct {
 }
 
 func (r *StandaloneReader) GetCF(cf string, key []byte) ([]byte, error) {
-	return engine_util.GetCFFromTxn(r.txn, cf, key)
+	value, err := engine_util.GetCFFromTxn(r.txn, cf, key)
+	return value, err
 }
 
 func (r *StandaloneReader) IterCF(cf string) engine_util.DBIterator {

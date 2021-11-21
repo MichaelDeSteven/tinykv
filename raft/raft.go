@@ -341,32 +341,37 @@ func (r *Raft) handlerRequestVoteResponse(m pb.Message) {
 }
 
 func (r *Raft) handleMsgHup(m pb.Message) {
-	r.becomeCandidate()
-	// single node case
-	if len(r.peers) == 1 {
-		r.becomeLeader()
-	}
-	// muti node case
-	for _, id := range r.peers {
-		if id == r.id {
-			continue
+	if r.State != StateLeader {
+		r.becomeCandidate()
+		// single node case
+		if len(r.peers) == 1 {
+			r.becomeLeader()
+			return
 		}
-		r.msgs = append(r.msgs, pb.Message{
-			From:    r.id,
-			To:      id,
-			MsgType: pb.MessageType_MsgRequestVote,
-			Term:    r.Term,
-		})
+		// muti node case
+		for _, id := range r.peers {
+			if id == r.id {
+				continue
+			}
+			r.msgs = append(r.msgs, pb.Message{
+				From:    r.id,
+				To:      id,
+				MsgType: pb.MessageType_MsgRequestVote,
+				Term:    r.Term,
+			})
+		}
 	}
 }
 
 func (r *Raft) handleMsgBeat(m pb.Message) {
-	r.becomeFollower(m.Term, m.From)
-	for _, id := range r.peers {
-		if id == r.id {
-			continue
+	if r.State == StateLeader {
+		r.becomeFollower(m.Term, m.From)
+		for _, id := range r.peers {
+			if id == r.id {
+				continue
+			}
+			r.sendHeartbeat(id)
 		}
-		r.sendHeartbeat(id)
 	}
 }
 

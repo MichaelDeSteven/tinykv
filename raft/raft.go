@@ -492,8 +492,7 @@ func (r *Raft) handleMsgPro(m pb.Message) {
 	if r.State == StateFollower {
 		m.From = r.id
 		m.To = r.Lead
-		// TODO redirect
-		// r.Step(m)
+		r.msgs = append(r.msgs, m)
 	}
 	if r.State == StateCandidate {
 		log.Printf("[handleMsgPro] drop entry\n")

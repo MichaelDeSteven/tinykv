@@ -371,16 +371,10 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		if !r.isMoreUpToDate(m.LogTerm, m.Index) {
 			r.becomeFollower(m.Term, None)
 		} else {
-			if m.Term > r.Term {
+			if m.Term > r.Term || r.Vote == None || r.Vote == m.From {
 				r.becomeFollower(m.Term, None)
 				r.Vote = m.From
 				reject = false
-			} else {
-				if r.Vote == None || r.Vote == m.From {
-					r.becomeFollower(m.Term, m.From)
-					r.Vote = m.From
-					reject = false
-				}
 			}
 		}
 	}

@@ -9,7 +9,9 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/log"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
@@ -43,6 +45,29 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	// Your Code Here (2B).
+	if d.RaftGroup.HasReady() {
+		rd := d.RaftGroup.Ready()
+		d.peerStorage.SaveReadyState(&rd)
+		d.Send(d.ctx.trans, rd.Messages)
+		for _, e := range rd.CommittedEntries {
+			d.process(&e)
+		}
+		d.RaftGroup.Advance(rd)
+	}
+}
+
+func (d *peerMsgHandler) process(e *eraftpb.Entry) {
+	// kvWB := engine_util.WriteBatch{}
+	// for _, req := range msg.Requests {
+	// 	switch req.CmdType {
+	// 	case raft_cmdpb.CmdType_Get:
+	// 	case raft_cmdpb.CmdType_Put:
+	// 		kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+	// 	case raft_cmdpb.CmdType_Delete:
+	// 		kvWB.DeleteCF(req.Get.Cf, req.Get.Key)
+	// 	case raft_cmdpb.CmdType_Snap:
+	// 	}
+	// }
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -114,6 +139,19 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+	d.proposals = append(d.proposals, &proposal{
+		index: d.nextProposalIndex(),
+		term:  d.Term(),
+		cb:    cb,
+	})
+	data, err := msg.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	err = d.RaftGroup.Propose(data)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (d *peerMsgHandler) onTick() {

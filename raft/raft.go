@@ -169,6 +169,7 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
+	
 	hardState, _, err := c.Storage.InitialState()
 	if err != nil {
 		panic(err)

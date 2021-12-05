@@ -115,7 +115,7 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	if l.applied+1 > l.committed {
 		return []pb.Entry{}
 	}
-	es, err := l.slice(l.applied+1, l.committed+1)
+	es, err := l.slice(l.applied+1, min(l.committed+1, uint64(len(l.entries))+l.offset))
 	if err != nil {
 		panic(err)
 	}

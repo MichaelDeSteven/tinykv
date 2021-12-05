@@ -199,7 +199,9 @@ func (rn *RawNode) Ready() Ready {
 	if !equal(hardState, rn.hardState) {
 		rd.HardState = *hardState
 	}
-
+	if len(rn.Raft.msgs) > 0 {
+		rd.Messages = rn.Raft.msgs
+	}
 	return rd
 }
 

@@ -17,7 +17,6 @@ package raft
 import (
 	"errors"
 
-	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 

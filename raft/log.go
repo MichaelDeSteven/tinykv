@@ -128,7 +128,7 @@ func (l *RaftLog) LastIndex() uint64 {
 	if entsLen := len(l.entries); entsLen != 0 {
 		return l.entries[entsLen-1].Index
 	}
-	li, err := l.storage.FirstIndex()
+	li, err := l.storage.LastIndex()
 	if err != nil {
 		panic(err)
 	}

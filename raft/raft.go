@@ -169,9 +169,12 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-	hardState, _, err := c.Storage.InitialState()
+	hardState, confState, err := c.Storage.InitialState()
 	if err != nil {
 		panic(err)
+	}
+	if c.peers == nil {
+		c.peers = confState.Nodes
 	}
 	prs := make(map[uint64]*Progress)
 	for _, p := range c.peers {

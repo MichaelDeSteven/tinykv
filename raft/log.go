@@ -115,7 +115,7 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	if l.applied+1 > l.committed {
 		return []pb.Entry{}
 	}
-	es, err := l.slice(l.applied+1, l.committed+1)
+	es, err := l.slice(l.applied+1, min(l.committed+1, uint64(len(l.entries))+l.offset))
 	if err != nil {
 		panic(err)
 	}
@@ -128,7 +128,7 @@ func (l *RaftLog) LastIndex() uint64 {
 	if entsLen := len(l.entries); entsLen != 0 {
 		return l.entries[entsLen-1].Index
 	}
-	li, err := l.storage.LastIndex()
+	li, err := l.storage.FirstIndex()
 	if err != nil {
 		panic(err)
 	}

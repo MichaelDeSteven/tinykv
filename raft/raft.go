@@ -624,7 +624,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	if r.Term == m.Term {
 		log.Printf("[handleAppendResponse] leader: %d, append response ent{%+v}\n", r.id, r.RaftLog.entries)
 		if m.Reject {
-			r.Prs[m.From].Next = m.Index + 1
+			r.Prs[m.From].Next -= 1
 			log.Printf("[handleAppendResponse] follower: %d Reject, Index: %d", m.From, m.Index)
 			// TODO compare prevlogIndex prevlogTerm
 			if r.Prs[m.From].Next < 0 {
@@ -633,8 +633,8 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 			}
 			r.sendAppend(m.From)
 		} else {
-			r.Prs[m.From].Match = m.Index
-			r.Prs[m.From].Next = m.Index + 1
+			r.Prs[m.From].Match = max(r.Prs[m.From].Match, m.Index)
+			r.Prs[m.From].Next = max(r.Prs[m.From].Next, m.Index+1)
 			log.Printf("[handleAppendResponse] leader: %d, follower：%d accepted, index：%d\n", r.id, m.From, m.Index)
 			if r.maybeCommit() {
 				log.Printf("[handleAppendResponse] leader: %d, index %d committed\n", r.id, r.RaftLog.committed)

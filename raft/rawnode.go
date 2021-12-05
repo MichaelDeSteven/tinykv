@@ -201,6 +201,7 @@ func (rn *RawNode) Ready() Ready {
 	}
 	if len(rn.Raft.msgs) > 0 {
 		rd.Messages = rn.Raft.msgs
+		rn.Raft.msgs = make([]pb.Message, 0)
 	}
 	return rd
 }

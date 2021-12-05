@@ -128,11 +128,11 @@ func (l *RaftLog) LastIndex() uint64 {
 	if entsLen := len(l.entries); entsLen != 0 {
 		return l.entries[entsLen-1].Index
 	}
-	li, err := l.storage.LastIndex()
+	li, err := l.storage.FirstIndex()
 	if err != nil {
 		panic(err)
 	}
-	return li
+	return li - 1
 }
 
 // Term return the term of the entry in the given index

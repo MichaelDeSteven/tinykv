@@ -93,7 +93,7 @@ func (d *peerMsgHandler) process(e *eraftpb.Entry, wb *engine_util.WriteBatch) {
 
 }
 
-func (d *peerMsgHandler) processCmdByType(p *proposal, req *raft_cmdpb.Request, resp *raft_cmdpb.RaftCmdResponse) {
+func (d *peerMsgHandler) processCmdByType(index uint64, p *proposal, req *raft_cmdpb.Request, resp *raft_cmdpb.RaftCmdResponse) {
 	switch req.CmdType {
 	case raft_cmdpb.CmdType_Put:
 		resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
@@ -106,6 +106,10 @@ func (d *peerMsgHandler) processCmdByType(p *proposal, req *raft_cmdpb.Request, 
 			Delete:  &raft_cmdpb.DeleteResponse{},
 		})
 	case raft_cmdpb.CmdType_Get:
+		wb := engine_util.WriteBatch{}
+		d.peerStorage.applyState.AppliedIndex = index
+		wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		wb.WriteToDB(d.peerStorage.Engines.Kv)
 		value, err := engine_util.GetCF(d.ctx.engine.Kv, req.Get.Cf, req.Get.Key)
 		if err != nil {
 			panic(err)
@@ -128,16 +132,14 @@ func (d *peerMsgHandler) processResp(index, term uint64, req *raft_cmdpb.Request
 		p := d.proposals[0]
 		d.proposals = d.proposals[1:]
 		if p.index != index {
-			p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
 			continue
 		}
 		if p.term != term {
-			p.cb.Done(ErrRespStaleCommand(p.term))
 			NotifyStaleReq(term, p.cb)
-			return
+			continue
 		}
 		resp := &raft_cmdpb.RaftCmdResponse{}
-		d.processCmdByType(p, req, resp)
+		d.processCmdByType(index, p, req, resp)
 		ensureRespHeader(resp)
 		// log.GlobalLogger().Printf("[process] %+v\n", resp)
 		p.cb.Done(resp)

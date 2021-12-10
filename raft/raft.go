@@ -44,6 +44,17 @@ func (st StateType) String() string {
 	return stmap[uint64(st)]
 }
 
+const Debug = 0
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
+
+var ErrUnexpectedCondition = errors.New("Unexpected Condition")
+
 // ErrProposalDropped is returned when the proposal is ignored by some cases,
 // so that the proposer can be notified and fail fast.
 var ErrProposalDropped = errors.New("raft proposal dropped")
@@ -205,18 +216,18 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	ents, err := r.RaftLog.slice(r.Prs[to].Next, r.RaftLog.LastIndex()+1)
-	if err != nil {
-		panic(err)
+	if r.Prs[to].Next > r.RaftLog.LastIndex()+1 {
+		return true
 	}
+	ents, _ := r.RaftLog.slice(r.Prs[to].Next, r.RaftLog.LastIndex()+1)
 	es := make([]*pb.Entry, len(ents))
 	for i := 0; i < len(ents); i++ {
 		es[i] = &ents[i]
 	}
-	log.Printf("[sendAppend] leader: %d, send ents{%+v} to Follower：%d\n", r.id, es, to)
 	prevLogIndex := r.Prs[to].Next - 1
 	prevLogTerm, err := r.RaftLog.Term(prevLogIndex)
 	if err != nil {
+		log.Printf("%d, %d", r.Prs[to].Next, r.RaftLog.LastIndex()+1)
 		panic(err)
 	}
 	r.msgs = append(r.msgs, pb.Message{
@@ -270,7 +281,7 @@ func (r *Raft) tickHeartBeat() {
 	r.heartbeatElapsed++
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
 		r.heartbeatElapsed = 0
-		log.Printf("[tickHeartBeat] leader：%d, send MsgBeat\n", r.id)
+		// log.Printf("[tickHeartBeat] leader：%d, send MsgBeat\n", r.id)
 		r.Step(pb.Message{
 			From:    r.id,
 			To:      r.id,
@@ -303,6 +314,7 @@ func (r *Raft) becomeCandidate() {
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	DPrintf("[becomeLeader] %d become Leader\n", r.id)
 	r.State = StateLeader
 	r.reset()
 
@@ -326,15 +338,12 @@ func (r *Raft) becomeLeader() {
 	}
 }
 
-func (r *Raft) resetVotes() {
-	r.votes = map[uint64]bool{}
-}
-
 func (r *Raft) reset() {
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
+	// randomElectionTimeout in [electionTimeout, 2*electionTimeout)
 	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
-	r.resetVotes()
+	r.votes = map[uint64]bool{}
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -343,11 +352,11 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
-		r.handleMsgHup(m)
+		r.hup(m)
 	case pb.MessageType_MsgBeat:
-		r.handleMsgBeat(m)
+		r.msgBeat(m)
 	case pb.MessageType_MsgPropose:
-		r.handleMsgPro(m)
+		r.propose(m)
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(m)
 	case pb.MessageType_MsgRequestVoteResponse:
@@ -359,17 +368,46 @@ func (r *Raft) Step(m pb.Message) error {
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
-		r.handleAppendResponse(m)
+		r.handleAppendEntriesResponse(m)
 	}
 	return nil
+}
+
+func (r *Raft) hup(m pb.Message) {
+	if r.State != StateLeader {
+		r.becomeCandidate()
+		// single node case
+		if len(r.Prs) == 1 {
+			r.becomeLeader()
+			return
+		}
+		// muti node case
+		for k, _ := range r.Prs {
+			if k == r.id {
+				continue
+			}
+			lastLogIndex := r.RaftLog.LastIndex()
+			lastLogTerm, err := r.RaftLog.Term(lastLogIndex)
+			if err != nil {
+				panic(err)
+			}
+			r.msgs = append(r.msgs, pb.Message{
+				From:    r.id,
+				To:      k,
+				MsgType: pb.MessageType_MsgRequestVote,
+				Term:    r.Term,
+				Index:   lastLogIndex,
+				LogTerm: lastLogTerm,
+			})
+		}
+	}
 }
 
 func (r *Raft) handleRequestVote(m pb.Message) {
 	// check vote rule
 	reject := true
 	if r.Term > m.Term {
-		// ignored
-		return
+		// reject
 	} else {
 		if !r.isMoreUpToDate(m.LogTerm, m.Index) {
 			r.becomeFollower(m.Term, None)
@@ -390,12 +428,27 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 	})
 }
 
+func (r *Raft) handlerRequestVoteResponse(m pb.Message) {
+	if r.Term == m.Term && r.State == StateCandidate {
+		majority := len(r.Prs) >> 1
+		r.recordVote(m.From, !m.Reject)
+		granted, rejected := r.cntVote()
+		DPrintf("[handlerRequestVoteResponse] Candidates %d: granted：%d, rejected：%d\n", r.id, granted, rejected)
+		if granted > majority {
+			r.becomeLeader()
+		} else if rejected > majority {
+			r.becomeFollower(m.Term, None)
+		}
+	}
+	// TODO m.Term > r.Term case
+}
+
 // 5.4.1 election restriction
 func (r *Raft) isMoreUpToDate(lastLogTerm, lastLogIndex uint64) bool {
 	li := r.RaftLog.LastIndex()
 	liTerm, err := r.RaftLog.Term(li)
-	log.Printf("liTerm：%d, li：%d\n", liTerm, li)
-	log.Printf("lastLogTerm：%d, lastLogIndex：%d\n", lastLogTerm, lastLogIndex)
+	// log.Printf("liTerm：%d, li：%d\n", liTerm, li)
+	// log.Printf("lastLogTerm：%d, lastLogIndex：%d\n", lastLogTerm, lastLogIndex)
 	if err != nil {
 		panic(liTerm)
 	}
@@ -427,62 +480,7 @@ func (r *Raft) cntVote() (granted, rejected int) {
 	return granted, rejected
 }
 
-func (r *Raft) handlerRequestVoteResponse(m pb.Message) {
-	if r.Term == m.Term && r.State == StateCandidate {
-		r.recordVote(m.From, !m.Reject)
-		granted, rejected := r.cntVote()
-		log.Printf("[handlerRequestVoteResponse] granted：%d, rejected：%d\n", granted, rejected)
-		if granted > (len(r.Prs) >> 1) {
-			r.becomeLeader()
-		} else if rejected > (len(r.Prs) >> 1) {
-			r.becomeFollower(m.Term, None)
-		}
-	}
-	// TODO m.Term > r.Term case
-}
-
-func (r *Raft) handleMsgHup(m pb.Message) {
-	if r.State != StateLeader {
-		r.becomeCandidate()
-		// single node case
-		if len(r.Prs) == 1 {
-			r.becomeLeader()
-			return
-		}
-		// muti node case
-		for k, _ := range r.Prs {
-			if k == r.id {
-				continue
-			}
-			prevLogIndex := r.RaftLog.LastIndex()
-			prevLogTerm, err := r.RaftLog.Term(prevLogIndex)
-			if err != nil {
-				panic(err)
-			}
-			r.msgs = append(r.msgs, pb.Message{
-				From:    r.id,
-				To:      k,
-				MsgType: pb.MessageType_MsgRequestVote,
-				Term:    r.Term,
-				Index:   prevLogIndex,
-				LogTerm: prevLogTerm,
-			})
-		}
-	}
-}
-
-func (r *Raft) handleMsgBeat(m pb.Message) {
-	if r.State == StateLeader {
-		for k, _ := range r.Prs {
-			if k == r.id {
-				continue
-			}
-			r.sendHeartbeat(k)
-		}
-	}
-}
-
-func (r *Raft) handleMsgPro(m pb.Message) {
+func (r *Raft) propose(m pb.Message) {
 	if r.State == StateLeader {
 		r.appendEntries(m.Entries)
 		// single node case
@@ -498,7 +496,7 @@ func (r *Raft) handleMsgPro(m pb.Message) {
 		r.msgs = append(r.msgs, m)
 	}
 	if r.State == StateCandidate {
-		log.Printf("[handleMsgPro] drop entry\n")
+		DPrintf("[handleMsgPro] Candidate drop entry\n")
 	}
 }
 
@@ -508,13 +506,12 @@ func (r *Raft) appendEntries(entries []*pb.Entry) {
 	for i, e := range entries {
 		e.Index = li + 1 + uint64(i)
 		e.Term = r.Term
-		log.Printf("[appendEntries] {%+v}\n", e)
+		DPrintf("[appendEntries] {%+v}\n", e)
 		ents = append(ents, *e)
 	}
 	r.RaftLog.append(ents...)
 	r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
-	// log.Printf("Next:%d, Match:%d\n", r.Prs[r.id].Next, r.Prs[r.id].Match)
 }
 
 // handleAppendEntries handle AppendEntries RPC request
@@ -522,130 +519,103 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
 	if m.Term >= r.Term {
 		r.becomeFollower(m.Term, m.From)
-		if m.Index < r.RaftLog.committed {
-			r.msgs = append(r.msgs, pb.Message{
-				From:    r.id,
-				To:      m.From,
-				Term:    m.Term,
-				MsgType: pb.MessageType_MsgAppendResponse,
-			})
-			return
-		}
-		log.Printf("[handleAppendEntries] %+v\n", m)
 		// follower log Index greater than leader prevLogIndex
 		if m.Index > r.RaftLog.LastIndex() {
-			prevLogTerm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
-			r.msgs = append(r.msgs, pb.Message{
-				From:    r.id,
-				To:      m.From,
-				Term:    r.Term,
-				MsgType: pb.MessageType_MsgAppendResponse,
-				Index:   r.RaftLog.LastIndex(),
-				LogTerm: prevLogTerm,
-				Reject:  true,
-			})
+			r.sendAppendResponse(m.From, true)
 			return
 		}
 
 		// unmatch：decrease prevlogIndex to retry
 		prevLogTerm, _ := r.RaftLog.Term(m.Index)
 		if prevLogTerm != m.LogTerm {
-			prevLogTerm, _ := r.RaftLog.Term(m.Index - 1)
-			r.msgs = append(r.msgs, pb.Message{
-				From:    r.id,
-				To:      m.From,
-				Term:    r.Term,
-				MsgType: pb.MessageType_MsgAppendResponse,
-				Index:   m.Index - 1,
-				LogTerm: prevLogTerm,
-				Reject:  true,
-			})
+			r.sendAppendResponse(m.From, true)
 			return
 		}
-		// log.Printf("prevLogTerm: %d, m.LogTerm: %d, m.Index: %d\n", prevLogTerm, m.LogTerm, m.Index)
 		// Log Matching property
-		if len(m.Entries) > 0 {
-			i, j := 0, m.Index+1
-			for i < len(m.Entries) && j <= r.RaftLog.LastIndex() {
-				prevLogTerm, err := r.RaftLog.Term(j)
-				if err != nil {
-					panic(err)
-				}
-				if prevLogTerm != m.Entries[i].Term {
-					r.RaftLog.stabled = min(r.RaftLog.stabled, j-1)
-					if offset := r.RaftLog.offset; j-offset < uint64(len(r.RaftLog.entries)) {
-						r.RaftLog.entries = r.RaftLog.entries[:j-offset]
-					}
-					break
-				}
-				i, j = i+1, j+1
+		i, j := 0, m.Index+1
+		for i < len(m.Entries) && j <= r.RaftLog.LastIndex() {
+			prevLogTerm, err := r.RaftLog.Term(j)
+			if err != nil {
+				panic(err)
 			}
-			if i < len(m.Entries) {
-				for _, e := range m.Entries[i:] {
-					r.RaftLog.append(*e)
-				}
+			// if existing entry conflicts, delete the existing entry and all that follow it
+			if prevLogTerm != m.Entries[i].Term {
+				r.RaftLog.entries = r.RaftLog.entries[:j-r.RaftLog.offset]
+				r.RaftLog.stabled = min(r.RaftLog.stabled, j-1)
+				break
+			}
+			i, j = i+1, j+1
+		}
+		if i < len(m.Entries) {
+			for _, e := range m.Entries[i:] {
+				r.RaftLog.append(*e)
 			}
 		}
 
-		// leaderCommit > commitIndex case
+		// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 		if m.Commit > r.RaftLog.committed {
-			// log.Printf("%d, %d\n", r.RaftLog.LastIndex(), m.Commit)
 			li := m.Index
 			if len(m.Entries) > 0 {
 				li = m.Entries[len(m.Entries)-1].Index
 			}
 			r.RaftLog.committed = min(m.Commit, li)
 		}
-		logTerm, _ := r.RaftLog.Term(m.Index)
-		r.msgs = append(r.msgs, pb.Message{
-			From:    r.id,
-			To:      m.From,
-			MsgType: pb.MessageType_MsgAppendResponse,
-			Term:    m.Term,
-			Index:   r.RaftLog.LastIndex(),
-			LogTerm: logTerm,
-		})
+		r.sendAppendResponse(m.From, false)
 	} else {
-		// ignored
-		log.Printf("[handleAppendEntries] term < currentTerm\n")
+		r.sendAppendResponse(m.From, true)
 	}
 }
 
-func (r *Raft) handleAppendResponse(m pb.Message) {
+func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
+	if r.State != StateLeader {
+		return
+	}
 	if r.Term > m.Term {
-		log.Printf("%+v\n", m)
-		log.Printf("[handleAppendResponse] drop: term > m.Term\n")
+		DPrintf("[handleAppendResponse] drop: term > m.Term\n")
 		return
 	}
 	if r.Term < m.Term {
-		log.Printf("[TODO][handleAppendResponse] term < m.Term\n")
+		r.becomeFollower(m.Term, None)
 		return
 	}
 	if r.Term == m.Term {
-		log.Printf("[handleAppendResponse] leader: %d, append response ent{%+v}\n", r.id, r.RaftLog.entries)
 		if m.Reject {
-			r.Prs[m.From].Next -= 1
-			log.Printf("[handleAppendResponse] follower: %d Reject, Index: %d", m.From, m.Index)
-			// TODO compare prevlogIndex prevlogTerm
-			if r.Prs[m.From].Next < 0 {
-				log.Printf("[TODO][handleAppendResponse] r.Prs[m.From].Next < 0\n")
-				return
+			DPrintf("[handleAppendResponse] follower: %d Reject, Index: %d", m.From, m.Index)
+			if r.Prs[m.From].Next > 0 {
+				r.Prs[m.From].Next -= 1
+				r.sendAppend(m.From)
 			}
-			r.sendAppend(m.From)
 		} else {
-			r.Prs[m.From].Match = max(r.Prs[m.From].Match, m.Index)
-			r.Prs[m.From].Next = max(r.Prs[m.From].Next, m.Index+1)
-			log.Printf("[handleAppendResponse] leader: %d, follower：%d accepted, index：%d\n", r.id, m.From, m.Index)
-			if r.maybeCommit() {
-				log.Printf("[handleAppendResponse] leader: %d, index %d committed\n", r.id, r.RaftLog.committed)
-				r.bcastAppend()
-			}
+			r.Prs[m.From].Match = m.Index
+			r.Prs[m.From].Next = m.Index + 1
+			DPrintf("[handleAppendResponse] leader: %d, follower：%d accepted, index：%d\n", r.id, m.From, m.Index)
+		}
+		if r.maybeCommit() {
+			DPrintf("[handleAppendResponse] leader: %d, index %d was committed\n", r.id, r.RaftLog.committed)
+			r.bcastAppend()
 		}
 	}
 }
 
+func (r *Raft) sendAppendResponse(to uint64, reject bool) {
+	li := r.RaftLog.LastIndex()
+	logTerm, err := r.RaftLog.Term(li)
+	if err != nil {
+		panic(ErrUnexpectedCondition)
+	}
+	r.msgs = append(r.msgs, pb.Message{
+		From:    r.id,
+		To:      to,
+		MsgType: pb.MessageType_MsgAppendResponse,
+		Term:    r.Term,
+		Index:   li,
+		LogTerm: logTerm,
+		Reject:  reject,
+	})
+}
+
 func (r *Raft) maybeCommit() bool {
-	for i := r.RaftLog.committed + 1; i <= r.RaftLog.LastIndex(); i++ {
+	for i := r.RaftLog.LastIndex(); i > r.RaftLog.committed; i-- {
 		cnt := 0
 		for _, prs := range r.Prs {
 			if prs.Match >= i {
@@ -673,39 +643,32 @@ func (r *Raft) bcastAppend() {
 	}
 }
 
+func (r *Raft) msgBeat(m pb.Message) {
+	if r.State == StateLeader {
+		for k, _ := range r.Prs {
+			if k == r.id {
+				continue
+			}
+			r.sendHeartbeat(k)
+		}
+	} else {
+		// ignore
+	}
+}
+
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
 	if m.Term >= r.Term {
-		if r.State == StateLeader {
-			log.Printf("[!!!TODO][handleHeartbeat] State == StateLeader\n")
-			return
-		}
-		if r.State == StateCandidate {
-			if m.Term > r.Term {
-				r.becomeFollower(m.Term, m.From)
-			} else {
-				log.Printf("[!!!TODO][handleHeartbeat] State == StateCandidate, m.Term == r.Term\n")
-				return
-			}
-		}
-		if r.State == StateFollower {
-			if m.Term > r.Term {
-				r.Lead = m.From
-			}
-			if r.RaftLog.committed < m.Commit {
-				r.RaftLog.committed = m.Commit
-				r.msgs = append(r.msgs, pb.Message{
-					From:    r.id,
-					To:      m.From,
-					Term:    r.Term,
-					MsgType: pb.MessageType_MsgHeartbeatResponse,
-				})
-			}
-		}
-	} else {
-		log.Printf("[!!!TODO][handleHeartbeat] term < currentTerm\n")
+		r.becomeFollower(m.Term, m.From)
+		r.RaftLog.committed = min(m.Commit, r.RaftLog.committed)
 	}
+	r.msgs = append(r.msgs, pb.Message{
+		From:    r.id,
+		To:      m.From,
+		Term:    r.Term,
+		MsgType: pb.MessageType_MsgHeartbeatResponse,
+	})
 }
 
 func (r *Raft) handleHeartbeatResponse(m pb.Message) {
@@ -716,7 +679,7 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 			r.sendAppend(m.From)
 		}
 	} else {
-		log.Printf("[TODO][handleHeartbeatResponse] State != StateLeader\n")
+		// ignore
 	}
 }
 

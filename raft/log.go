@@ -15,8 +15,6 @@
 package raft
 
 import (
-	"log"
-
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -70,12 +68,11 @@ func newLog(storage Storage) *RaftLog {
 	if err != nil {
 		panic(err)
 	}
-	log.Printf("[newLog] firstIndex: %d, lastIndex: %d\n", firstIndex, lastIndex)
+	DPrintf("[newLog] firstIndex: %d, lastIndex: %d\n", firstIndex, lastIndex)
 	ents, err := storage.Entries(firstIndex, lastIndex+1)
 	if err != nil {
 		panic(err)
 	}
-	log.Printf("[newLog] ents{%+v} recover from storage\n", ents)
 
 	return &RaftLog{
 		committed: firstIndex - 1,
@@ -97,7 +94,6 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	log.Printf("[unstableEntries] stabledIndex: %d, LastIndex: %d\n", l.stabled, l.LastIndex())
 	if l.LastIndex() <= l.stabled {
 		return []pb.Entry{}
 	}
@@ -111,7 +107,6 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	log.Printf("[nextEnts] appliedInx: %d, committedInx: %d\n", l.applied, l.committed)
 	if l.applied+1 > l.committed {
 		return []pb.Entry{}
 	}
@@ -148,14 +143,12 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 }
 
 func (l *RaftLog) append(entries ...pb.Entry) {
-	// log.Printf("[append] before append unstableOffset: %d, ents{%+v}\n", l.offset, l.entries)
 	l.entries = append(l.entries, entries...)
-	// log.Printf("[append] after append unstableOffset: %d, ents{%+v}\n", l.offset, l.entries)
 }
 
 // get the index of [lo, hi) entries
 func (l *RaftLog) slice(lo, hi uint64) ([]pb.Entry, error) {
-	log.Printf("[slice] index[%d:%d]\n", lo, hi)
+	DPrintf("[slice] index[%d:%d]\n", lo, hi)
 	if lo == hi {
 		return nil, nil
 	}

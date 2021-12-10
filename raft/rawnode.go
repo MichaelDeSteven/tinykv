@@ -70,8 +70,8 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
-	hardState *pb.HardState
-	softState *SoftState
+	prevHardState *pb.HardState
+	prevSoftState *SoftState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
@@ -90,9 +90,9 @@ func NewRawNode(config *Config) (*RawNode, error) {
 	}
 
 	return &RawNode{
-		Raft:      r,
-		hardState: &hardState,
-		softState: &SoftState,
+		Raft:          r,
+		prevHardState: &hardState,
+		prevSoftState: &SoftState,
 	}, nil
 }
 
@@ -193,10 +193,10 @@ func (rn *RawNode) Ready() Ready {
 	softState := rn.getSoftState()
 	hardState := rn.getHardState()
 
-	if !softState.equal(rn.softState) {
+	if !softState.equal(rn.prevSoftState) {
 		rd.SoftState = softState
 	}
-	if !equal(hardState, rn.hardState) {
+	if !equal(hardState, rn.prevHardState) {
 		rd.HardState = *hardState
 	}
 	if len(rn.Raft.msgs) > 0 {
@@ -210,6 +210,12 @@ func (rn *RawNode) Ready() Ready {
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
 	r, rLog := rn.Raft, rn.Raft.RaftLog
+	if !rn.getSoftState().equal(rn.prevSoftState) {
+		return true
+	}
+	if hs := rn.getHardState(); !IsEmptyHardState(*hs) && !equal(hs, rn.prevHardState) {
+		return true
+	}
 	if len(r.msgs) > 0 || len(rLog.unstableEntries()) > 0 || len(rLog.nextEnts()) > 0 {
 		return true
 	}
@@ -220,6 +226,12 @@ func (rn *RawNode) HasReady() bool {
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	if rd.SoftState != nil {
+		rn.prevSoftState = rd.SoftState
+	}
+	if !IsEmptyHardState(rd.HardState) {
+		rn.prevHardState = &rd.HardState
+	}
 	if len(rd.Entries) > 0 {
 		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].Index
 	}

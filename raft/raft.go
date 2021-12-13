@@ -216,19 +216,39 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
+	DPrintf("[sendAppend] %d sendAppend To %d, next: %d, last: %d\n", r.id, to, r.Prs[to].Next, r.RaftLog.LastIndex())
 	if r.Prs[to].Next > r.RaftLog.LastIndex()+1 {
 		return true
 	}
-	ents, _ := r.RaftLog.slice(r.Prs[to].Next, r.RaftLog.LastIndex()+1)
+	// if a leader fails to get term or entries, the leader requests snapshot
+	ents, erre := r.RaftLog.slice(r.Prs[to].Next, r.RaftLog.LastIndex()+1)
+	prevLogIndex := r.Prs[to].Next - 1
+	prevLogTerm, errt := r.RaftLog.Term(prevLogIndex)
+	if erre != nil || errt != nil {
+		DPrintf("[sendAppend] send snapshot\n")
+		snapshot, err := r.RaftLog.Snapshot()
+		if err != nil {
+			if err == ErrSnapshotTemporarilyUnavailable {
+				DPrintf("[sendAppend] temporarily unavailable\n")
+				return false
+			}
+			panic(ErrUnexpectedCondition)
+		}
+		if IsEmptySnap(&snapshot) {
+			panic("need non-empty snapshot")
+		}
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType:  pb.MessageType_MsgSnapshot,
+			From:     r.id,
+			To:       to,
+			Term:     r.Term,
+			Snapshot: &snapshot,
+		})
+		return false
+	}
 	es := make([]*pb.Entry, len(ents))
 	for i := 0; i < len(ents); i++ {
 		es[i] = &ents[i]
-	}
-	prevLogIndex := r.Prs[to].Next - 1
-	prevLogTerm, err := r.RaftLog.Term(prevLogIndex)
-	if err != nil {
-		log.Printf("%d, %d", r.Prs[to].Next, r.RaftLog.LastIndex()+1)
-		panic(err)
 	}
 	r.msgs = append(r.msgs, pb.Message{
 		From:    r.id,
@@ -369,6 +389,8 @@ func (r *Raft) Step(m pb.Message) error {
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
 		r.handleAppendEntriesResponse(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	}
 	return nil
 }
@@ -534,10 +556,10 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		// Log Matching property
 		i, j := 0, m.Index+1
 		for i < len(m.Entries) && j <= r.RaftLog.LastIndex() {
-			prevLogTerm, err := r.RaftLog.Term(j)
-			if err != nil {
-				panic(err)
-			}
+			prevLogTerm, _ := r.RaftLog.Term(j)
+			// if err != nil {
+			// 	panic(err)
+			// }
 			// if existing entry conflicts, delete the existing entry and all that follow it
 			if prevLogTerm != m.Entries[i].Term {
 				r.RaftLog.entries = r.RaftLog.entries[:j-r.RaftLog.offset]
@@ -603,7 +625,7 @@ func (r *Raft) sendAppendResponse(to uint64, reject bool) {
 	if err != nil {
 		panic(ErrUnexpectedCondition)
 	}
-	r.msgs = append(r.msgs, pb.Message{
+	msg := pb.Message{
 		From:    r.id,
 		To:      to,
 		MsgType: pb.MessageType_MsgAppendResponse,
@@ -611,7 +633,9 @@ func (r *Raft) sendAppendResponse(to uint64, reject bool) {
 		Index:   li,
 		LogTerm: logTerm,
 		Reject:  reject,
-	})
+	}
+	DPrintf("[sendAppendResponse] %+v\n", msg)
+	r.msgs = append(r.msgs, msg)
 }
 
 func (r *Raft) maybeCommit() bool {
@@ -686,6 +710,34 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	DPrintf("[handleSnapshot] %+v\n", m.Snapshot)
+	if m.Term < r.Term {
+		return
+	}
+	r.becomeFollower(m.Term, m.From)
+	snapshot, l := m.Snapshot, r.RaftLog
+	sindex, sterm := snapshot.Metadata.Index, snapshot.Metadata.Term
+	if sindex < r.RaftLog.committed {
+		r.sendAppendResponse(m.From, true)
+		return
+	}
+	r.RaftLog.pendingSnapshot = snapshot
+	ents := make([]pb.Entry, 1)
+	ents[0].Index = sindex
+	ents[0].Term = sterm
+	l.entries = ents
+	l.offset = sindex
+	l.committed = sindex
+	l.applied = sindex
+	l.stabled = sindex
+	// restore node information
+	nodes := m.Snapshot.Metadata.ConfState.Nodes
+	prs := make(map[uint64]*Progress)
+	for _, i := range nodes {
+		prs[i] = &Progress{Next: r.RaftLog.LastIndex(), Match: 0}
+	}
+	r.Prs = prs
+	r.sendAppendResponse(m.From, false)
 }
 
 // addNode add a new node to raft group

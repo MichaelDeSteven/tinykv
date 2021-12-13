@@ -73,6 +73,23 @@ func (d *peerMsgHandler) process(e *eraftpb.Entry, wb *engine_util.WriteBatch) {
 	if err != nil {
 		panic(err)
 	}
+	if msg.AdminRequest != nil {
+		// log.GlobalLogger().Printf("[process] adminReq: %+v\n", msg)
+		switch msg.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			truncatedIndex := d.peerStorage.truncatedIndex()
+			// log.GlobalLogger().Printf("%d, %d\n", truncatedIndex, msg.AdminRequest.CompactLog.CompactIndex-1)
+			if compactLog, TruncatedState := msg.AdminRequest.CompactLog, d.peerStorage.applyState.TruncatedState; compactLog.CompactIndex > truncatedIndex {
+				TruncatedState.Index = compactLog.CompactIndex
+				TruncatedState.Term = compactLog.CompactTerm
+			}
+			wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+			d.ScheduleCompactLog(truncatedIndex)
+		default:
+			panic("AdminRequest.CmdType != CompactLogType")
+		}
+
+	}
 	if msg.Requests != nil && len(msg.Requests) > 0 {
 		// not support batch now
 		if len(msg.Requests) > 1 {
@@ -86,6 +103,7 @@ func (d *peerMsgHandler) process(e *eraftpb.Entry, wb *engine_util.WriteBatch) {
 		case raft_cmdpb.CmdType_Delete:
 			wb.DeleteCF(req.Delete.Cf, req.Delete.Key)
 		case raft_cmdpb.CmdType_Snap:
+			// log.GlobalLogger().Printf("[Snap] %+v\n", msg)
 		case raft_cmdpb.CmdType_Get:
 		}
 		d.processResp(e.Index, e.Term, req)
@@ -119,6 +137,10 @@ func (d *peerMsgHandler) processCmdByType(index uint64, p *proposal, req *raft_c
 			Get:     &raft_cmdpb.GetResponse{Value: value},
 		})
 	case raft_cmdpb.CmdType_Snap:
+		wb := engine_util.WriteBatch{}
+		d.peerStorage.applyState.AppliedIndex = index
+		wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		wb.WriteToDB(d.peerStorage.Engines.Kv)
 		resp.Responses = append(resp.Responses, &raft_cmdpb.Response{
 			CmdType: raft_cmdpb.CmdType_Snap,
 			Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
@@ -545,7 +567,7 @@ func (d *peerMsgHandler) onRaftGCLogTick() {
 		log.Fatalf("appliedIdx: %d, firstIdx: %d, compactIdx: %d", appliedIdx, firstIdx, compactIdx)
 		panic(err)
 	}
-
+	// log.GlobalLogger().Printf("[onRaftGCLogTick] appliedIdx: %d, firstIdx: %d, compactIndex: %d\n", appliedIdx, firstIdx, compactIdx)
 	// Create a compact log request and notify directly.
 	regionID := d.regionId
 	request := newCompactLogRequest(regionID, d.Meta, compactIdx, term)

@@ -70,9 +70,9 @@ func newLog(storage Storage) *RaftLog {
 	}
 	DPrintf("[newLog] firstIndex: %d, lastIndex: %d\n", firstIndex, lastIndex)
 	ents, err := storage.Entries(firstIndex, lastIndex+1)
-	if err != nil {
-		panic(err)
-	}
+	// if err != nil {
+	// 	panic(err)
+	// }
 
 	return &RaftLog{
 		committed: firstIndex - 1,
@@ -89,6 +89,20 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	if len(l.entries) > 0 {
+		fi, _ := l.storage.FirstIndex()
+		DPrintf("[maybeCompact] fi: %d, offset: %d\n", fi, l.offset)
+		if fi > l.offset {
+			if len(l.entries) > 0 {
+				l.entries = l.entries[fi-l.offset:]
+				ents := make([]pb.Entry, len(l.entries))
+				copy(ents, l.entries)
+				l.entries = ents
+			}
+			l.offset = fi
+		}
+	}
+
 }
 
 // unstableEntries return all the unstable entries
@@ -146,9 +160,43 @@ func (l *RaftLog) append(entries ...pb.Entry) {
 	l.entries = append(l.entries, entries...)
 }
 
+func (l *RaftLog) FirstIndex() uint64 {
+	if l.pendingSnapshot != nil {
+		return l.pendingSnapshot.Metadata.Index + 1
+	} else {
+		index, err := l.storage.FirstIndex()
+		if err != nil {
+			panic(err)
+		}
+		return index
+	}
+}
+
+// l.firstIndex <= lo <= hi <= l.firstIndex + len(l.entries)
+func (l *RaftLog) checkOutOfBounds(lo, hi uint64) error {
+	if lo > hi {
+		panic(ErrUnexpectedCondition)
+	}
+	fi := l.FirstIndex()
+	if lo < fi {
+		DPrintf("[checkOutOfBounds] lo: %d, fi: %d\n", lo, fi)
+		return ErrCompacted
+	}
+
+	length := l.LastIndex() + 1 - fi
+	if hi > fi+length {
+		panic(ErrUnexpectedCondition)
+	}
+	return nil
+}
+
 // get the index of [lo, hi) entries
 func (l *RaftLog) slice(lo, hi uint64) ([]pb.Entry, error) {
-	DPrintf("[slice] index[%d:%d]\n", lo, hi)
+	DPrintf("[slice] index[%d:%d)\n", lo, hi)
+	err := l.checkOutOfBounds(lo, hi)
+	if err != nil {
+		return nil, err
+	}
 	if lo == hi {
 		return nil, nil
 	}
@@ -156,4 +204,11 @@ func (l *RaftLog) slice(lo, hi uint64) ([]pb.Entry, error) {
 		return l.entries[lo-l.offset : hi-l.offset], nil
 	}
 	return l.storage.Entries(lo, hi)
+}
+
+func (l *RaftLog) Snapshot() (pb.Snapshot, error) {
+	if l.pendingSnapshot != nil {
+		return *l.pendingSnapshot, nil
+	}
+	return l.storage.Snapshot()
 }

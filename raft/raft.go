@@ -336,6 +336,7 @@ func (r *Raft) becomeLeader() {
 	// NOTE: Leader should propose a noop entry on its term
 	DPrintf("[becomeLeader] %d become Leader\n", r.id)
 	r.State = StateLeader
+	r.Lead = r.id
 	r.reset()
 
 	li := r.RaftLog.LastIndex()
@@ -370,6 +371,9 @@ func (r *Raft) reset() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+	if r.Prs[r.id] == nil {
+		return nil
+	}
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
 		r.hup(m)
@@ -391,6 +395,10 @@ func (r *Raft) Step(m pb.Message) error {
 		r.handleAppendEntriesResponse(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(m)
+	case pb.MessageType_MsgTimeoutNow:
+		r.handleTimeoutNow(m)
 	}
 	return nil
 }
@@ -504,6 +512,17 @@ func (r *Raft) cntVote() (granted, rejected int) {
 
 func (r *Raft) propose(m pb.Message) {
 	if r.State == StateLeader {
+		if r.leadTransferee != None {
+			return
+		}
+		if len(m.Entries) > 0 && m.Entries[0].EntryType == pb.EntryType_EntryConfChange {
+			if r.PendingConfIndex <= r.RaftLog.applied {
+				r.PendingConfIndex = r.RaftLog.applied
+			} else {
+				r.msgs = append(r.msgs, m)
+				return
+			}
+		}
 		r.appendEntries(m.Entries)
 		// single node case
 		if len(r.Prs) == 1 {
@@ -610,6 +629,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		} else {
 			r.Prs[m.From].Match = m.Index
 			r.Prs[m.From].Next = m.Index + 1
+			r.maybeTransferLeader()
 			DPrintf("[handleAppendResponse] leader: %d, follower：%d accepted, index：%d\n", r.id, m.From, m.Index)
 		}
 		if r.maybeCommit() {
@@ -743,9 +763,63 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	DPrintf("[addNode] add %d\n", id)
+	r.Prs[id] = &Progress{Match: 0, Next: r.RaftLog.LastIndex() + 1}
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	DPrintf("[removeNode] remove %d\n", id)
+	delete(r.Prs, id)
+	r.maybeCommit()
+}
+
+func (r *Raft) checkQualification(transferee uint64) bool {
+	if _, ok := r.Prs[transferee]; !ok || transferee == r.id || r.leadTransferee != None {
+		DPrintf("[checkQualification] ingore\n")
+		return false
+	}
+	r.leadTransferee = transferee
+	// check is up to date
+	DPrintf("[checkQualification] %d, %d\n", r.Prs[transferee].Match, r.Prs[transferee].Next)
+	if prs, _ := r.Prs[transferee]; prs.Match < r.RaftLog.LastIndex() {
+		r.sendAppend(transferee)
+		return false
+	}
+	return true
+}
+
+func (r *Raft) transferLeader() {
+	DPrintf("[transferLeader] leader: %d, send MsgTimeoutNow\n", r.id)
+	r.msgs = append(r.msgs, pb.Message{
+		From:    r.id,
+		To:      r.leadTransferee,
+		MsgType: pb.MessageType_MsgTimeoutNow,
+	})
+	r.leadTransferee = None
+}
+
+func (r *Raft) handleTransferLeader(m pb.Message) {
+	if r.State == StateLeader {
+		DPrintf("[handleTransferLeader] %+v\n", m)
+		if r.checkQualification(m.From) {
+			r.transferLeader()
+		}
+	} else {
+		DPrintf("[handleTransferLeader] redirect to leader\n")
+		m.To = r.Lead
+		r.msgs = append(r.msgs, m)
+	}
+}
+
+func (r *Raft) maybeTransferLeader() {
+	if prs := r.Prs[r.leadTransferee]; r.leadTransferee != None && prs.Match+1 == prs.Next {
+		r.transferLeader()
+	}
+}
+
+func (r *Raft) handleTimeoutNow(m pb.Message) {
+	DPrintf("[handleTimeoutNow] %d start a new election\n", r.id)
+	r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgHup})
 }

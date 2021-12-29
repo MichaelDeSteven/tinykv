@@ -73,6 +73,10 @@ var (
 	ErrStoreNotFound = func(storeID uint64) error {
 		return errors.Errorf("store %v not found", storeID)
 	}
+
+	ErrRegionEpochIsNil = func(RegionId uint64) error {
+		return errors.Errorf("region %d epoch is nil", RegionId)
+	}
 )
 
 const (

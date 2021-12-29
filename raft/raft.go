@@ -209,6 +209,7 @@ func newRaft(c *Config) *Raft {
 	r.Term = hardState.Term
 	r.RaftLog.committed = hardState.Commit
 	r.becomeFollower(r.Term, None)
+	DPrintf("[newRaft] %+v\n", r)
 	return r
 }
 
@@ -244,6 +245,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 			Term:     r.Term,
 			Snapshot: &snapshot,
 		})
+		r.Prs[to].Next = snapshot.Metadata.Index + 1
 		return false
 	}
 	es := make([]*pb.Entry, len(ents))
@@ -266,12 +268,13 @@ func (r *Raft) sendAppend(to uint64) bool {
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
+	DPrintf("[sendHeartbeat] %d sendHeartbeat to %d\n", r.id, to)
 	r.msgs = append(r.msgs, pb.Message{
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
 		MsgType: pb.MessageType_MsgHeartbeat,
-		Commit:  r.RaftLog.committed,
+		// Commit:  r.RaftLog.committed,
 	})
 }
 
@@ -371,9 +374,6 @@ func (r *Raft) reset() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	if r.Prs[r.id] == nil {
-		return nil
-	}
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
 		r.hup(m)
@@ -558,6 +558,7 @@ func (r *Raft) appendEntries(entries []*pb.Entry) {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	DPrintf("[handleAppendEntries] %d handle msg:%+v\n", r.id, m)
 	if m.Term >= r.Term {
 		r.becomeFollower(m.Term, m.From)
 		// follower log Index greater than leader prevLogIndex
@@ -567,8 +568,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		}
 
 		// unmatch：decrease prevlogIndex to retry
-		prevLogTerm, _ := r.RaftLog.Term(m.Index)
-		if prevLogTerm != m.LogTerm {
+		prevLogTerm, err := r.RaftLog.Term(m.Index)
+		if err != nil || prevLogTerm != m.LogTerm {
 			r.sendAppendResponse(m.From, true)
 			return
 		}
@@ -581,7 +582,11 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			// }
 			// if existing entry conflicts, delete the existing entry and all that follow it
 			if prevLogTerm != m.Entries[i].Term {
-				r.RaftLog.entries = r.RaftLog.entries[:j-r.RaftLog.offset]
+				if j < r.RaftLog.offset {
+					r.RaftLog.entries = r.RaftLog.entries[:0]
+				} else {
+					r.RaftLog.entries = r.RaftLog.entries[:j-r.RaftLog.offset]
+				}
 				r.RaftLog.stabled = min(r.RaftLog.stabled, j-1)
 				break
 			}
@@ -668,7 +673,8 @@ func (r *Raft) maybeCommit() bool {
 		}
 		term, err := r.RaftLog.Term(i)
 		if err != nil {
-			panic(err)
+			continue
+			// panic(err)
 		}
 		if cnt > (len(r.Prs)>>1) && r.Term == term {
 			r.RaftLog.committed = i
@@ -693,6 +699,7 @@ func (r *Raft) msgBeat(m pb.Message) {
 			if k == r.id {
 				continue
 			}
+			DPrintf("[msgBeat] leader：%d send heartbeat\n", r.id)
 			r.sendHeartbeat(k)
 		}
 	} else {
@@ -821,5 +828,8 @@ func (r *Raft) maybeTransferLeader() {
 
 func (r *Raft) handleTimeoutNow(m pb.Message) {
 	DPrintf("[handleTimeoutNow] %d start a new election\n", r.id)
+	if _, ok := r.Prs[r.id]; !ok {
+		return
+	}
 	r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgHup})
 }

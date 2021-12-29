@@ -361,6 +361,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		StartKey: snapData.Region.StartKey,
 		EndKey:   snapData.Region.EndKey,
 	}
+	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
 	return applySnapResult, nil
 }
 
@@ -374,6 +375,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	var applySnapResult *ApplySnapResult
 	if !raft.IsEmptySnap(&ready.Snapshot) {
 		applySnapResult, _ = ps.ApplySnapshot(&ready.Snapshot, &kvWB, &raftWB)
+		kvWB.WriteToDB(ps.Engines.Kv)
 	}
 	ps.Append(ready.Entries, &raftWB)
 	if !raft.IsEmptyHardState(ready.HardState) {

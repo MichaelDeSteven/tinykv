@@ -70,12 +70,30 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	prevHardState *pb.HardState
+	prevSoftState *SoftState
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	r := newRaft(config)
+	hardState := pb.HardState{
+		Term:   r.Term,
+		Vote:   r.Vote,
+		Commit: r.RaftLog.committed,
+	}
+
+	SoftState := SoftState{
+		Lead:      r.Lead,
+		RaftState: r.State,
+	}
+
+	return &RawNode{
+		Raft:          r,
+		prevHardState: &hardState,
+		prevSoftState: &SoftState,
+	}, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -140,15 +158,75 @@ func (rn *RawNode) Step(m pb.Message) error {
 	return ErrStepPeerNotFound
 }
 
+func (a *SoftState) equal(b *SoftState) bool {
+	return a.Lead == b.Lead && a.RaftState == b.RaftState
+}
+
+func equal(a *pb.HardState, b *pb.HardState) bool {
+	return a.Term == b.Term && a.Vote == b.Vote && a.Commit == b.Commit
+}
+
+func (rn *RawNode) getSoftState() *SoftState {
+	return &SoftState{
+		Lead:      rn.Raft.Lead,
+		RaftState: rn.Raft.State,
+	}
+}
+
+func (rn *RawNode) getHardState() *pb.HardState {
+	return &pb.HardState{
+		Term:   rn.Raft.Term,
+		Vote:   rn.Raft.Vote,
+		Commit: rn.Raft.RaftLog.committed,
+	}
+}
+
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	rd := Ready{
+		Entries:          rn.Raft.RaftLog.unstableEntries(),
+		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
+		HardState:        pb.HardState{},
+		SoftState:        nil,
+	}
+	softState := rn.getSoftState()
+	hardState := rn.getHardState()
+
+	if !softState.equal(rn.prevSoftState) {
+		rd.SoftState = softState
+	}
+	if !equal(hardState, rn.prevHardState) {
+		rd.HardState = *hardState
+	}
+	if len(rn.Raft.msgs) > 0 {
+		rd.Messages = rn.Raft.msgs
+		rn.Raft.msgs = make([]pb.Message, 0)
+	}
+	if l := rn.Raft.RaftLog; !IsEmptySnap(l.pendingSnapshot) {
+		DPrintf("[Ready] %+v\n", l.pendingSnapshot)
+		rd.Snapshot = *l.pendingSnapshot
+		l.pendingSnapshot = nil
+	}
+	return rd
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
+	r, rLog := rn.Raft, rn.Raft.RaftLog
+	if !rn.getSoftState().equal(rn.prevSoftState) {
+		return true
+	}
+	if hs := rn.getHardState(); !IsEmptyHardState(*hs) && !equal(hs, rn.prevHardState) {
+		return true
+	}
+	if len(r.msgs) > 0 || len(rLog.unstableEntries()) > 0 || len(rLog.nextEnts()) > 0 {
+		return true
+	}
+	if !IsEmptySnap(rLog.pendingSnapshot) {
+		return true
+	}
 	return false
 }
 
@@ -156,6 +234,19 @@ func (rn *RawNode) HasReady() bool {
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	if rd.SoftState != nil {
+		rn.prevSoftState = rd.SoftState
+	}
+	if !IsEmptyHardState(rd.HardState) {
+		rn.prevHardState = &rd.HardState
+	}
+	if len(rd.Entries) > 0 {
+		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].Index
+	}
+	if len(rd.CommittedEntries) > 0 {
+		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
+	}
+	rn.Raft.RaftLog.maybeCompact()
 }
 
 // GetProgress return the Progress of this node and its peers, if this

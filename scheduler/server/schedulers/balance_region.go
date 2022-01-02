@@ -14,6 +14,8 @@
 package schedulers
 
 import (
+	"sort"
+
 	"github.com/pingcap-incubator/tinykv/scheduler/server/core"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule/operator"
@@ -77,6 +79,62 @@ func (s *balanceRegionScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 
 func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operator {
 	// Your Code Here (3C).
-
-	return nil
+	ss := make([]*core.StoreInfo, 0)
+	for _, s := range cluster.GetStores() {
+		if s.IsUp() && s.DownTime() <= cluster.GetMaxStoreDownTime() {
+			ss = append(ss, s)
+		}
+	}
+	sort.Slice(ss, func(i, j int) bool {
+		return ss[i].GetRegionSize() > ss[j].GetRegionSize()
+	})
+	var region *core.RegionInfo
+	var store, targetStore *core.StoreInfo
+	for _, s := range ss {
+		cluster.GetPendingRegionsWithLock(s.GetID(), func(rc core.RegionsContainer) {
+			region = rc.RandomRegion(nil, nil)
+		})
+		if region != nil {
+			store = s
+			break
+		}
+		cluster.GetFollowersWithLock(s.GetID(), func(rc core.RegionsContainer) {
+			region = rc.RandomRegion(nil, nil)
+		})
+		if region != nil {
+			store = s
+			break
+		}
+		cluster.GetLeadersWithLock(s.GetID(), func(rc core.RegionsContainer) {
+			region = rc.RandomRegion(nil, nil)
+		})
+		if region != nil {
+			store = s
+			break
+		}
+	}
+	if region == nil || len(region.GetStoreIds()) < cluster.GetMaxReplicas() {
+		return nil
+	}
+	for i := len(ss) - 1; i >= 0; i-- {
+		if _, ok := region.GetStoreIds()[ss[i].GetID()]; !ok {
+			targetStore = ss[i]
+			break
+		}
+	}
+	if targetStore == nil {
+		return nil
+	}
+	if store.GetRegionSize()-targetStore.GetRegionSize() < 2*region.GetApproximateSize() {
+		return nil
+	}
+	p, err := cluster.AllocPeer(targetStore.GetID())
+	if err != nil {
+		return nil
+	}
+	op, err := operator.CreateMovePeerOperator("", cluster, region, operator.OpBalance, store.GetID(), targetStore.GetID(), p.GetId())
+	if err != nil {
+		return nil
+	}
+	return op
 }

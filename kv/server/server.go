@@ -151,22 +151,127 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 
 func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrpcpb.ScanResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+	kv := make([]*kvrpcpb.KvPair, 0)
+	reader, err := server.storage.Reader(req.Context)
+	if err != nil {
+		panic(err)
+	}
+	txn := mvcc.NewMvccTxn(reader, req.Version)
+	scanner := mvcc.NewScanner(req.StartKey, txn)
+	defer scanner.Close()
+	for i := 0; i < int(req.Limit); i++ {
+		k, v, err := scanner.Next()
+		if k == nil {
+			break
+		}
+		if v == nil || err != nil {
+			continue
+		}
+		kv = append(kv, &kvrpcpb.KvPair{Key: k, Value: v})
+	}
+	return &kvrpcpb.ScanResponse{Pairs: kv}, nil
 }
 
 func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnStatusRequest) (*kvrpcpb.CheckTxnStatusResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+	reader, err := server.storage.Reader(req.Context)
+	if err != nil {
+		panic(err)
+	}
+	txn := mvcc.NewMvccTxn(reader, req.LockTs)
+	write, _, _ := txn.CurrentWrite(req.PrimaryKey)
+	if write != nil {
+		if write.Kind == mvcc.WriteKindRollback {
+			return &kvrpcpb.CheckTxnStatusResponse{Action: kvrpcpb.Action_NoAction}, nil
+		} else {
+			return &kvrpcpb.CheckTxnStatusResponse{
+				CommitVersion: write.StartTS,
+				Action:        kvrpcpb.Action_NoAction,
+			}, nil
+		}
+	}
+	lock, err := txn.GetLock(req.PrimaryKey)
+	if err != nil {
+		panic(err)
+	}
+	if lock == nil || lock.Ttl < mvcc.PhysicalTime(req.CurrentTs)-mvcc.PhysicalTime(req.LockTs) {
+		txn.DeleteLock(req.PrimaryKey)
+		txn.DeleteValue(req.PrimaryKey)
+		txn.PutWrite(req.PrimaryKey, req.LockTs, &mvcc.Write{StartTS: req.LockTs, Kind: mvcc.WriteKindRollback})
+		server.storage.Write(req.Context, txn.Writes())
+		if lock == nil {
+			return &kvrpcpb.CheckTxnStatusResponse{Action: kvrpcpb.Action_LockNotExistRollback}, nil
+		}
+		return &kvrpcpb.CheckTxnStatusResponse{Action: kvrpcpb.Action_TTLExpireRollback}, nil
+	} else {
+		return &kvrpcpb.CheckTxnStatusResponse{Action: kvrpcpb.Action_NoAction, LockTtl: lock.Ttl}, nil
+	}
 }
 
 func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollbackRequest) (*kvrpcpb.BatchRollbackResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+	reader, err := server.storage.Reader(req.Context)
+	if err != nil {
+		panic(err)
+	}
+	txn := mvcc.NewMvccTxn(reader, req.StartVersion)
+	for _, key := range req.Keys {
+		write, _, _ := txn.CurrentWrite(key)
+		if write != nil {
+			if write.StartTS == req.StartVersion {
+				if write.Kind != mvcc.WriteKindRollback {
+					return &kvrpcpb.BatchRollbackResponse{Error: &kvrpcpb.KeyError{}}, nil
+				} else {
+					return &kvrpcpb.BatchRollbackResponse{}, nil
+				}
+			} else {
+				return &kvrpcpb.BatchRollbackResponse{}, nil
+			}
+		}
+		lock, err := txn.GetLock(key)
+		if err != nil {
+			panic(err)
+		}
+		if lock != nil && lock.Ts == req.StartVersion {
+			txn.DeleteValue(key)
+			txn.DeleteLock(key)
+		}
+		txn.PutWrite(key, req.StartVersion, &mvcc.Write{StartTS: req.StartVersion, Kind: mvcc.WriteKindRollback})
+	}
+	server.storage.Write(req.Context, txn.Writes())
+	return &kvrpcpb.BatchRollbackResponse{}, nil
 }
 
 func (server *Server) KvResolveLock(_ context.Context, req *kvrpcpb.ResolveLockRequest) (*kvrpcpb.ResolveLockResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+	reader, err := server.storage.Reader(req.Context)
+	if err != nil {
+		panic(err)
+	}
+	txn := mvcc.NewMvccTxn(reader, req.StartVersion)
+	kls, err := mvcc.AllLocksForTxn(txn)
+	if err != nil {
+		panic(err)
+	}
+	keys := make([][]byte, len(kls))
+	for i, kl := range kls {
+		keys[i] = kl.Key
+	}
+	if req.CommitVersion == 0 {
+		server.KvBatchRollback(nil, &kvrpcpb.BatchRollbackRequest{
+			Context:      req.Context,
+			Keys:         keys,
+			StartVersion: req.StartVersion,
+		})
+	} else {
+		server.KvCommit(nil, &kvrpcpb.CommitRequest{
+			Context:       req.Context,
+			Keys:          keys,
+			StartVersion:  req.StartVersion,
+			CommitVersion: req.CommitVersion,
+		})
+	}
+	return &kvrpcpb.ResolveLockResponse{}, nil
 }
 
 // SQL push down commands.

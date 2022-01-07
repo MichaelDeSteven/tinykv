@@ -117,7 +117,8 @@ func (c *Config) validate() error {
 // Progress represents a follower’s progress in the view of the leader. Leader maintains
 // progresses of all followers, and sends entries to the follower based on its progress.
 type Progress struct {
-	Match, Next uint64
+	Match, Next  uint64
+	recentActive bool
 }
 
 type Raft struct {
@@ -303,8 +304,12 @@ func (r *Raft) tickElection() {
 func (r *Raft) tickHeartBeat() {
 	r.heartbeatElapsed++
 	if r.heartbeatElapsed >= r.heartbeatTimeout {
+		if !r.checkQuorumActive() {
+			r.becomeFollower(r.Term, None)
+			return
+		}
 		r.heartbeatElapsed = 0
-		// log.Printf("[tickHeartBeat] leader：%d, send MsgBeat\n", r.id)
+		DPrintf("[tickHeartBeat] leader：%d, send MsgBeat\n", r.id)
 		r.Step(pb.Message{
 			From:    r.id,
 			To:      r.id,
@@ -312,6 +317,23 @@ func (r *Raft) tickHeartBeat() {
 			Term:    r.Term,
 		})
 	}
+}
+
+func (r *Raft) checkQuorumActive() bool {
+	if pr := r.Prs[r.id]; pr != nil {
+		pr.recentActive = true
+	}
+	cnt := 0
+	for _, prs := range r.Prs {
+		if prs.recentActive {
+			cnt++
+		}
+		prs.recentActive = false
+	}
+	if cnt < (len(r.Prs) >> 1) {
+		return false
+	}
+	return true
 }
 
 // becomeFollower transform this peer's state to Follower
@@ -477,8 +499,8 @@ func (r *Raft) handlerRequestVoteResponse(m pb.Message) {
 func (r *Raft) isMoreUpToDate(lastLogTerm, lastLogIndex uint64) bool {
 	li := r.RaftLog.LastIndex()
 	liTerm, err := r.RaftLog.Term(li)
-	// log.Printf("liTerm：%d, li：%d\n", liTerm, li)
-	// log.Printf("lastLogTerm：%d, lastLogIndex：%d\n", lastLogTerm, lastLogIndex)
+	DPrintf("liTerm：%d, li：%d\n", liTerm, li)
+	DPrintf("lastLogTerm：%d, lastLogIndex：%d\n", lastLogTerm, lastLogIndex)
 	if err != nil {
 		panic(liTerm)
 	}
@@ -558,7 +580,6 @@ func (r *Raft) appendEntries(entries []*pb.Entry) {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
-	DPrintf("[handleAppendEntries] %d handle msg:%+v\n", r.id, m)
 	if m.Term >= r.Term {
 		r.becomeFollower(m.Term, m.From)
 		// follower log Index greater than leader prevLogIndex
@@ -625,6 +646,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		return
 	}
 	if r.Term == m.Term {
+		r.Prs[m.From].recentActive = true
 		if m.Reject {
 			DPrintf("[handleAppendResponse] follower: %d Reject, Index: %d", m.From, m.Index)
 			if r.Prs[m.From].Next > 0 {
@@ -712,7 +734,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
 	if m.Term >= r.Term {
 		r.becomeFollower(m.Term, m.From)
-		r.RaftLog.committed = min(m.Commit, r.RaftLog.committed)
+		// r.RaftLog.committed = min(m.Commit, r.RaftLog.committed)
 	}
 	r.msgs = append(r.msgs, pb.Message{
 		From:    r.id,
@@ -727,6 +749,7 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 		if m.Term > r.Term {
 			r.becomeFollower(m.Term, None)
 		} else {
+			r.Prs[m.From].recentActive = true
 			r.sendAppend(m.From)
 		}
 	} else {

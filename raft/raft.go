@@ -44,7 +44,7 @@ func (st StateType) String() string {
 	return stmap[uint64(st)]
 }
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -734,7 +734,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
 	if m.Term >= r.Term {
 		r.becomeFollower(m.Term, m.From)
-		r.RaftLog.committed = min(m.Commit, r.RaftLog.committed)
+		// r.RaftLog.committed = min(m.Commit, r.RaftLog.committed)
 	}
 	r.msgs = append(r.msgs, pb.Message{
 		From:    r.id,
